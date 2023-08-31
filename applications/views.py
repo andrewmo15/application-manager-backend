@@ -1,44 +1,39 @@
-from .models import Application, UserInfo
-from .serializers import ApplicationSerializers, UserSerializers, UserInfoSerializers
+from .models import Application, Users
+from .serializers import ApplicationSerializers, UsersSerializers
 from rest_framework import status, viewsets
 from rest_framework.response import Response
-from rest_framework.authentication import TokenAuthentication
-from rest_framework.permissions import IsAuthenticated
-from django.contrib.auth.models import User
-from .emailparser import EmailParser
+from .gmailparser import GmailParser
 from .classifier import EmailData
-from rest_framework.decorators import permission_classes, authentication_classes
-from django.http import JsonResponse, HttpResponse
 from django.shortcuts import get_object_or_404
+from django.http import HttpResponse
+import json
 
 class ApplicationViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
-    authentication_classes = (TokenAuthentication,)
 
     # GET /applications
     def list(self, request):
         applications = Application.objects.all()
         serializer = ApplicationSerializers(applications, many=True)
         return Response(serializer.data)
-    
+
     # POST /applications
     def create(self, request):
-        serializer = ApplicationSerializers(data=request.data)
-        if serializer.is_valid():
-            queryset = Application.objects.filter(username=request.data["username"], company=request.data["company"], position=request.data["position"])
-            if not queryset.exists():
+        queryset = Application.objects.filter(user_id=request.data["user_id"], company=request.data["company"], position=request.data["position"])
+        if not queryset.exists():
+            serializer = ApplicationSerializers(data=request.data)
+            if serializer.is_valid():
                 serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
             else:
-                self.update(request, queryset.first().id)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return self.update(request, queryset.first().id)
 
     # GET /applications/id
     def retrieve(self, request, pk=None):
         queryset = Application.objects.all()
         application = get_object_or_404(queryset, pk=pk)
         serializer = ApplicationSerializers(application)
-        return JsonResponse(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     # PUT /applications/id
     def update(self, request, pk=None):
@@ -55,80 +50,74 @@ class ApplicationViewSet(viewsets.ViewSet):
         application.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-class UserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all()
-    serializer_class = UserSerializers
 
-class UserInfoViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
-    authentication_classes = (TokenAuthentication,)
+class UsersViewSet(viewsets.ViewSet):
 
-    # GET /userinfo
-    def list(self, request):
-        userinfos = UserInfo.objects.all()
-        serializer = UserInfoSerializers(userinfos, many=True)
+    # GET /users
+    def list(self, requests):
+        users = Users.objects.all()
+        serializer = UsersSerializers(users, many=True)
         return Response(serializer.data)
-    
-    # POST /userinfo
+
+    # POST /users
     def create(self, request):
-        serializer = UserInfoSerializers(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        queryset = Users.objects.filter(email=request.data["email"])
+        if not queryset.exists():
+            serializer = UsersSerializers(data=request.data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            else:
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        dic = queryset.first().__dict__
+        del dic['_state']
+        return HttpResponse(json.dumps(dic))
 
-    # GET /userinfo/username
+    # GET /users/id
     def retrieve(self, request, pk=None):
-        queryset = UserInfo.objects.filter(username=pk)
-        serializer = UserInfoSerializers(queryset.first())
-        qsetuser = User.objects.filter(username=pk)
-        user = qsetuser.first()
-        serializer_data = serializer.data
-        serializer_data["user_id"] = user.id
-        return Response(serializer_data)
+        queryset = Users.objects.all()
+        user = get_object_or_404(queryset, pk=pk)
+        serializer = UsersSerializers(user)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
-    # PUT /userinfo/username
+    # PUT /users/id
     def update(self, request, pk=None):
-        userinfo = UserInfo.objects.get(username=pk)
-        serializer = UserInfoSerializers(userinfo, data=request.data)
+        user = Users.objects.get(pk=pk)
+        serializer = UsersSerializers(user, data=request.data)
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
-    # DELETE /userinfo/username
+    # DELETE /users/id
     def destroy(self, request, pk=None):
-        userinfo = UserInfo.objects.get(username=pk)
-        userinfo.delete()
+        users = Users.objects.get(pk=pk)
+        users.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
-    
-@permission_classes([IsAuthenticated])
-@authentication_classes(TokenAuthentication,)
-# GET newApplications/username
-def getNewApplications(request, username=None):
+
+# GET newApplications/id
+def getNewApplications(request, pk=None):
+    token = request.META["HTTP_AUTHORIZATION"]
     try:
-        user = UserInfo.objects.filter(username=username)[0].email
+        user = Users.objects.filter(pk=pk)[0]
     except:
-        return HttpResponse(status=404)
+        return Response(status=status.HTTP_400_BAD_REQUEST)
     if request.method == "GET":
-        try:
-            userinfo = UserInfo.objects.filter(username=username)[0]
-            password = userinfo.imap_password
-            imap_url = userinfo.imap_url
-            last_refresh = userinfo.last_refresh
-        except:
-            return HttpResponse(status=404)
-        parser = EmailParser(user, password, imap_url, last_refresh)
-        emails = parser.getEmails()
+        last_refresh = user.last_refresh
+        email_type = user.email_type
+        emails = []
+        if email_type == "gmail":
+            parser = GmailParser(token, last_refresh)
+            emails = parser.getEmails()
         classifier = EmailData(emails)
         newApplications = classifier.getClassifications()
-        return JsonResponse({'newApplications': newApplications})
-    return HttpResponse(status=400)
+        return HttpResponse(json.dumps({'newApplications': newApplications}))
+    return Response(status=status.HTTP_400_BAD_REQUEST)
 
-@permission_classes([IsAuthenticated])
-@authentication_classes(TokenAuthentication,)
-# GET userApplications/username
-def getUserApplications(request, username=None):
-    queryset = Application.objects.filter(username=username)
-    rtn = [ApplicationSerializers(query).data for query in queryset]
-    return JsonResponse({"applications": rtn})
+# GET userApplications/id
+def getUserApplications(request, user_id=None):
+    if request.method == "GET":
+        queryset = Application.objects.filter(user_id=user_id)
+        rtn = [ApplicationSerializers(query).data for query in queryset]
+        return HttpResponse(json.dumps({"applications": rtn}))
+    return Response(status=status.HTTP_400_BAD_REQUEST)
